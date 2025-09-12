@@ -6,10 +6,10 @@ import torch.nn.functional as F
 
 class MultiStageAdapter(nn.Module):
     """
-    Model that takes embeddings from 4 stages of ResNet and converts them into embeddings for Qwen.
-    It uses 1x1 convolutions to project each stage to the desired output dimension, upsamples them to the
-    same spatial size, concatenates them, and applies a fusion network. Finally, it flattens the spatial dimensions
-    and applies a linear interpolation to get the target sequence length. A Layer Normalization is applied at the end.
+    Model that takes embeddings from four stages of ResNet and converts them into embeddings suitable for Qwen.
+    It uses 1x1 convolutions to project each stage to a common dimension, upsamples them to the size of the last stage,
+    concatenates them, and applies a fusion network followed by adaptive pooling and positional embeddings.
+    The output is a sequence of embeddings ready for Qwen.
     """
 
     def __init__(self, stage_channels=[256, 512, 1024, 2048], out_dim=2048, hidden_multiplier=2, grid_size=14):
@@ -20,6 +20,7 @@ class MultiStageAdapter(nn.Module):
             stage_channels (list): List of channel dimensions for each ResNet stage.
             out_dim (int): Desired output dimension for Qwen embeddings.
             hidden_multiplier (int): Multiplier for the hidden dimension in the fusion network.
+            grid_size (int): The side length of the output grid (e.g., 14 for a 14x14 grid -> 196 tokens).
         """
 
         super().__init__()
@@ -46,13 +47,12 @@ class MultiStageAdapter(nn.Module):
         self.final_norm = nn.LayerNorm(out_dim)
 
 
-    def forward(self, stage0, stage1, stage2, stage3, target_seq_len=196):
+    def forward(self, stage0, stage1, stage2, stage3):
         """
         Forward pass for MultiStageAdapter.
 
         Args:
             stage0, stage1, stage2, stage3 (torch.Tensor): Feature maps from the 4 ResNet stages.
-            target_seq_len (int): Desired sequence length for the output embeddings.
         """
 
         # Get spatial dimensions from the last stage
@@ -101,14 +101,13 @@ class CompositeModel(nn.Module):
         self.adapter = MultiStageAdapter()
 
 
-    def forward(self, pixel_values, target_seq_len=196):
+    def forward(self, pixel_values):
         """
         Forward pass for CompositeModel.
         It extracts features from ResNet and passes them through the MultiStageAdapter.
 
         Args:
             pixel_values (torch.Tensor): Input image tensor.
-            target_seq_len (int): Desired sequence length for the output embeddings.
 
         Returns:
             torch.Tensor: Output embeddings suitable for Qwen.
@@ -144,6 +143,6 @@ class CompositeModel(nn.Module):
         )
 
         # Pass the features through the MultiStageAdapter
-        projected = self.adapter(stage0, stage1, stage2, stage3, target_seq_len)
+        projected = self.adapter(stage0, stage1, stage2, stage3)
         
         return projected

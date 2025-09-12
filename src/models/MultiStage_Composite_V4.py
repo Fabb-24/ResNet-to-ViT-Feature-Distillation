@@ -7,53 +7,56 @@ import torch.nn.functional as F
 
 class MultiStageAdapter(nn.Module):
     """
-    An advanced adapter that takes embeddings from 4 stages of ResNet and converts them into Qwen-compatible embeddings.
-    
-    Improvements:
-    1.  Uses 3x3 convolutions in the fusion block to capture local spatial context.
-    2.  Incorporates a Transformer Encoder (self-attention) to learn global relationships between image regions.
-    3.  Uses adaptive pooling and learnable positional embeddings to preserve spatial information.
+    Model that takes embeddings from four stages of ResNet and converts them into embeddings suitable for Qwen.
+    It uses 1x1 convolutions to project each stage to a common dimension, upsamples them to the size of the last stage,
+    concatenates them, and applies a fusion network followed by adaptive pooling and positional embeddings.
+    The output is a sequence of embeddings ready for Qwen.
+
+    This version incorporates a Transformer Encoder for self-attention to capture global relationships and enhances
+    the fusion network by adding 3x3 convolutions to better capture local spatial context.
     """
 
-    def __init__(self, stage_channels=[256, 512, 1024, 2048], out_dim=2048, hidden_multiplier=2, grid_size=14, n_heads=8, num_attention_layers=2):
+    def __init__(self, stage_channels=[256, 512, 1024, 2048], out_dim=2048, grid_size=14, n_heads=8, num_attention_layers=2, bottleneck_dim=512):
         """
         Constructor for the AdvancedMultiStageAdapter.
 
         Args:
             stage_channels (list): Channel dimensions for each ResNet stage.
             out_dim (int): The desired output feature dimension.
-            hidden_multiplier (int): Multiplier for the fusion network's hidden layer.
             grid_size (int): The side length of the output grid (e.g., 14 for a 14x14 grid -> 196 tokens).
             n_heads (int): Number of attention heads in the Transformer Encoder. Must be a divisor of out_dim.
             num_attention_layers (int): Number of layers in the Transformer Encoder.
+            bottleneck_dim (int): Bottleneck dimension for the fusion network.
         """
-        
+
         super().__init__()
 
-        # 1. Projections to unify channel dimensions
+        # Projections to unify channel dimensions
         self.projections = nn.ModuleList([
             nn.Conv2d(c, out_dim, kernel_size=1) for c in stage_channels
         ])
 
-        # 2. Fusion network with 1x1 convolution for local context
+        # Fusion network with 1x1 and 3x3 convolutions for local context
+        input_fusion_dim = out_dim * len(stage_channels)
         self.fusion = nn.Sequential(
-            # Using kernel_size=1 maintains spatial dimensions
-            nn.Conv2d(out_dim * len(stage_channels), out_dim * hidden_multiplier, kernel_size=1),
+            nn.Conv2d(input_fusion_dim, bottleneck_dim, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(out_dim * hidden_multiplier, out_dim, kernel_size=1)
+            nn.Conv2d(bottleneck_dim, bottleneck_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(bottleneck_dim, out_dim, kernel_size=1)
         )
         
-        # 3. Transformer Encoder for global context (self-attention)
+        # Transformer Encoder for global context (self-attention)
         encoder_layer = TransformerEncoderLayer(d_model=out_dim, nhead=n_heads, batch_first=True)
         self.attention = TransformerEncoder(encoder_layer, num_layers=num_attention_layers)
 
-        # 4. Adaptive pooling to create a fixed-size grid
+        # Adaptive pooling to create a fixed-size grid
         self.adaptive_pool = nn.AdaptiveAvgPool2d((grid_size, grid_size))
 
-        # 5. Learnable positional embeddings for the grid tokens
+        # Learnable positional embeddings for the grid tokens
         self.pos_embed = nn.Parameter(torch.zeros(1, grid_size * grid_size, out_dim))
         
-        # 6. Final Layer Normalization
+        # Final Layer Normalization
         self.final_norm = nn.LayerNorm(out_dim)
 
 
@@ -77,11 +80,11 @@ class MultiStageAdapter(nn.Module):
             x = F.interpolate(x, size=(Ht, Wt), mode='bilinear', align_corners=False)
             proj_feats.append(x)
 
-        # Concatenate and apply the CONVOLUTIONAL fusion network
+        # Concatenate and apply the convolutional fusion network
         fused = torch.cat(proj_feats, dim=1)
         fused = self.fusion(fused)  # Shape: (B, C, H, W)
 
-        # Apply SELF-ATTENTION to learn global relationships
+        # Apply self-attention to learn global relationships
         B, C, H, W = fused.shape
         # Reshape for attention: (B, C, H, W) -> (B, L, C) where L = H*W
         fused_seq = fused.flatten(2).permute(0, 2, 1)
@@ -89,14 +92,14 @@ class MultiStageAdapter(nn.Module):
         # Reshape back to image format: (B, L, C) -> (B, C, H, W)
         attended_img = attended_seq.permute(0, 2, 1).view(B, C, H, W)
         
-        # Apply ADAPTIVE POOLING to get a fixed grid size
+        # Apply adaptive pooling to get a fixed grid size
         pooled = self.adaptive_pool(attended_img) # Shape: (B, C, grid_size, grid_size)
 
-        # Flatten grid to sequence and add POSITIONAL EMBEDDINGS
+        # Flatten grid to sequence and add positional embeddings
         seq = pooled.flatten(2).permute(0, 2, 1) # Shape: (B, grid_size*grid_size, C)
         seq = seq + self.pos_embed
         
-        # Apply final LAYER NORMALIZATION
+        # Apply final layer normalization
         seq = self.final_norm(seq)
         
         return seq
@@ -119,14 +122,13 @@ class CompositeModel(nn.Module):
         self.adapter = MultiStageAdapter()
 
 
-    def forward(self, pixel_values, target_seq_len=196):
+    def forward(self, pixel_values):
         """
         Forward pass for CompositeModel.
         It extracts features from ResNet and passes them through the MultiStageAdapter.
 
         Args:
             pixel_values (torch.Tensor): Input image tensor.
-            target_seq_len (int): Desired sequence length for the output embeddings.
 
         Returns:
             torch.Tensor: Output embeddings suitable for Qwen.

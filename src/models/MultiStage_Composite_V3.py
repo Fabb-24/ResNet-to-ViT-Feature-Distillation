@@ -6,20 +6,23 @@ import torch.nn.functional as F
 
 class MultiStageAdapter(nn.Module):
     """
-    Model that takes embeddings from 4 stages of ResNet and converts them into embeddings for Qwen.
-    It uses 1x1 convolutions to project each stage to the desired output dimension, upsamples them to the
-    same spatial size, concatenates them, and applies a fusion network. Finally, it flattens the spatial dimensions
-    and applies a linear interpolation to get the target sequence length. A Layer Normalization is applied at the end.
+    Model that takes embeddings from four stages of ResNet and converts them into embeddings suitable for Qwen.
+    It uses 1x1 convolutions to project each stage to a common dimension, upsamples them to the size of the last stage,
+    concatenates them, and applies a fusion network followed by adaptive pooling and positional embeddings.
+    The output is a sequence of embeddings ready for Qwen.
+
+    This version enhances the fusion network by adding 3x3 convolutions to better capture local spatial context.
     """
 
-    def __init__(self, stage_channels=[256, 512, 1024, 2048], out_dim=2048, hidden_multiplier=2):
+    def __init__(self, stage_channels=[256, 512, 1024, 2048], out_dim=2048, grid_size=14, bottleneck_dim=512):
         """
         Constructor for MultiStageAdapter.
 
         Args:
             stage_channels (list): List of channel dimensions for each ResNet stage.
             out_dim (int): Desired output dimension for Qwen embeddings.
-            hidden_multiplier (int): Multiplier for the hidden dimension in the fusion network.
+            grid_size (int): The side length of the output grid (e.g., 14 for a 14x14 grid -> 196 tokens).
+            bottleneck_dim (int): Bottleneck dimension for the fusion network.
         """
 
         super().__init__()
@@ -30,23 +33,31 @@ class MultiStageAdapter(nn.Module):
         ])
 
         # Fusion network, a small MLP with GELU activation between two linear layers implemented as 1x1 convolutions
+        input_fusion_dim = out_dim * len(stage_channels)
         self.fusion = nn.Sequential(
-            nn.Conv2d(out_dim * len(stage_channels), out_dim * hidden_multiplier, kernel_size=1),
+            nn.Conv2d(input_fusion_dim, bottleneck_dim, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(out_dim * hidden_multiplier, out_dim, kernel_size=1)
+            nn.Conv2d(bottleneck_dim, bottleneck_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(bottleneck_dim, out_dim, kernel_size=1)
         )
+
+        # Adaptive pooling to a fixed grid size before flattening
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((grid_size, grid_size))
+
+        # Learnable positional embeddings for the flattened grid
+        self.pos_embed = nn.Parameter(torch.zeros(1, grid_size * grid_size, out_dim))
         
         # Final Layer Normalization
         self.final_norm = nn.LayerNorm(out_dim)
 
 
-    def forward(self, stage0, stage1, stage2, stage3, target_seq_len=196):
+    def forward(self, stage0, stage1, stage2, stage3):
         """
         Forward pass for MultiStageAdapter.
 
         Args:
             stage0, stage1, stage2, stage3 (torch.Tensor): Feature maps from the 4 ResNet stages.
-            target_seq_len (int): Desired sequence length for the output embeddings.
         """
 
         # Get spatial dimensions from the last stage
@@ -63,10 +74,14 @@ class MultiStageAdapter(nn.Module):
         fused = torch.cat(proj_feats, dim=1)  # (B, out_dim*4, Ht, Wt)
         fused = self.fusion(fused)           # (B, out_dim, Ht, Wt)
 
-        # Flatten spatial dimensions, interpolate to target sequence length and permute to (B, L, C)
-        seq = fused.flatten(2)               # (B, out_dim, Ht*Wt)
-        seq = F.interpolate(seq, size=target_seq_len, mode='linear', align_corners=False)
-        seq = seq.permute(0, 2, 1)           # (B, L, C)
+        # Apply adaptive pooling to get a fixed grid size
+        pooled = self.adaptive_pool(fused) # (B, out_dim, grid_size, grid_size)
+
+        # Flatten and permute
+        seq = pooled.flatten(2).permute(0, 2, 1) # (B, grid_size*grid_size, out_dim)
+
+        # Add positional embeddings
+        seq = seq + self.pos_embed
         
         # Apply final Layer Normalization
         seq = self.final_norm(seq)
@@ -91,14 +106,13 @@ class CompositeModel(nn.Module):
         self.adapter = MultiStageAdapter()
 
 
-    def forward(self, pixel_values, target_seq_len=196):
+    def forward(self, pixel_values):
         """
         Forward pass for CompositeModel.
         It extracts features from ResNet and passes them through the MultiStageAdapter.
 
         Args:
             pixel_values (torch.Tensor): Input image tensor.
-            target_seq_len (int): Desired sequence length for the output embeddings.
 
         Returns:
             torch.Tensor: Output embeddings suitable for Qwen.
@@ -134,6 +148,6 @@ class CompositeModel(nn.Module):
         )
 
         # Pass the features through the MultiStageAdapter
-        projected = self.adapter(stage0, stage1, stage2, stage3, target_seq_len)
+        projected = self.adapter(stage0, stage1, stage2, stage3)
         
         return projected
