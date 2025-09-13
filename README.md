@@ -1,4 +1,9 @@
 # ResNet-to-ViT Feature Distillation for Qwen-VL
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+![PyTorch](https://img.shields.io/badge/pytorch-2.0+-orange.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Status](https://img.shields.io/badge/status-experimental-red.svg)
+
 
 This project implements a pipeline to replace the Vision Transformer (ViT) encoder of the Qwen-VL model with a ResNet-50 encoder, using a multi-stage adapter for feature space translation. The goal is to create a more computationally efficient Vision-Language Model (VLM) while maintaining good text generation capabilities.
 
