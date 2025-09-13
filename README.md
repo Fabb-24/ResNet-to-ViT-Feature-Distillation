@@ -6,6 +6,13 @@
 
 
 This project implements a pipeline to replace the Vision Transformer (ViT) encoder of the Qwen-VL model with a ResNet-50 encoder, using a multi-stage adapter for feature space translation. The goal is to create a more computationally efficient Vision-Language Model (VLM) while maintaining good text generation capabilities.
+<br>
+<br>
+<p align="center">
+  <img src="readme_data/models.gif" alt="models-gif" width="65%">
+</p>
+<br>
+
 
 ## Technical Concept
 
